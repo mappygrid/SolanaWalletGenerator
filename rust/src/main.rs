@@ -220,9 +220,6 @@ fn main() {
                         break;
                     }
                 }
-
-                // Small delay to prevent excessive CPU usage
-                thread::sleep(Duration::from_millis(1));
             }
         }
     });
