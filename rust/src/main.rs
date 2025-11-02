@@ -4,8 +4,6 @@ use solana_sdk::{
 use bs58;
 use rayon::prelude::*;
 use std::{
-    fs::OpenOptions,
-    io::Write,
     sync::Arc,
     time::{Duration, Instant},
     env,
@@ -48,7 +46,6 @@ fn main() {
     // Parse arguments
     let mut ignore_case = false;
     let mut prefix_index = 1;
-    let mut max_wallets = 0u64;
 
     for (i, arg) in args.iter().enumerate() {
         match arg.as_str() {
@@ -59,8 +56,7 @@ fn main() {
                 }
             }
             _ if !arg.starts_with('-') && i > 1 && !args[i-1].starts_with('-') => {
-                // This is the max_wallets argument (not a flag and not the first non-flag argument)
-                max_wallets = arg.parse::<u64>().unwrap_or(0);
+                // This was the max_wallets argument, now ignored
             }
             _ if !arg.starts_with('-') && prefix_index == 1 && i != 1 => {
                 // Skip non-prefix arguments
@@ -71,7 +67,7 @@ fn main() {
 
     // Find the prefix argument (first non-flag argument)
     let mut prefix = "";
-    for (i, arg) in args.iter().enumerate() {
+    for (_i, arg) in args.iter().enumerate() {
         if !arg.starts_with('-') && *arg != args[0] {
             prefix = arg;
             break;
@@ -90,21 +86,13 @@ fn main() {
         prefix.to_string()
     };
 
-    // Create output file name based on prefix and timestamp
-    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ");
-    let output_file = format!("wallets_{}_{}.txt", prefix, timestamp);
-    let output_path = format!("wallets/{}", output_file);
-
     println!("🚀 Starting Solana vanity wallet generator");
     println!("📋 Search parameters:");
     println!("   - Prefix: \"{}\"{}", prefix, if ignore_case { " (case insensitive)" } else { "" });
-    let max_wallets_str = if max_wallets == 0 { "unlimited".to_string() } else { max_wallets.to_string() };
-    println!("   - Max wallets: {}", max_wallets_str);
-    println!("   - Output file: {}", output_path);
+    println!("   - Will generate 1 wallet with matching prefix");
     println!("⏱️  Starting search...\n");
 
     let start_time = Instant::now();
-    let output_path_arc = Arc::new(output_path);
     let prefix_arc = Arc::new(search_prefix.clone());
 
     // Spawn progress logging thread
@@ -144,13 +132,12 @@ fn main() {
     // Start simple and fast parallel wallet generation
     let generation_handle = thread::spawn({
         let prefix_clone = prefix_arc.clone();
-        let output_path_clone = output_path_arc.clone();
         let ignore_case_clone = ignore_case;
 
         move || {
             while !SHOULD_STOP.load(Ordering::Relaxed) {
                 let current_found = FOUND.load(Ordering::Relaxed);
-                if max_wallets > 0 && current_found >= max_wallets {
+                if current_found >= 1 {
                     break;
                 }
 
@@ -184,41 +171,13 @@ fn main() {
                     let wallet_num = FOUND.fetch_add(1, Ordering::Relaxed) + 1;
 
                     println!("\n✅ FOUND #{}: {}", wallet_num, pubkey);
-                    println!("🔑 SECRET (base58): {}", secret_key);
+                    // Private key not logged for security
 
-                    let attempts = ATTEMPTS.load(Ordering::Relaxed);
-                    println!("📈 Found after {} attempts\n", format_number(attempts));
+                    // Return the tuple result (public_key, private_key)
+                    println!("({}, {})", pubkey, secret_key);
 
-                    // Save to file
-                    let wallet_data = format!(
-                        "Wallet #{}\n\
-                         Public Key:  {}\n\
-                         Private Key: {}\n\
-                         Found after: {} attempts\n\
-                         Timestamp:   {}\n\
-                         {}\n\n",
-                        wallet_num,
-                        pubkey,
-                        secret_key,
-                        format_number(attempts),
-                        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-                        "=".repeat(60)
-                    );
-
-                    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&*output_path_clone) {
-                        if let Err(e) = file.write_all(wallet_data.as_bytes()) {
-                            eprintln!("❌ Error writing to file: {}", e);
-                        } else {
-                            println!("💾 Wallet saved to {}", &*output_path_clone);
-                        }
-                    } else {
-                        eprintln!("❌ Error opening output file");
-                    }
-
-                    // Check if we've found enough wallets
-                    if max_wallets > 0 && wallet_num >= max_wallets {
-                        break;
-                    }
+                    // Stop after finding 1 wallet
+                    break;
                 }
             }
         }
@@ -251,7 +210,7 @@ fn main() {
     println!("   - Total time: {:.2} seconds", total_time.as_secs_f64());
 
     if final_found > 0 {
-        println!("💾 All wallets saved to: {}", &*output_path_arc);
+        println!("✅ Wallet generation complete");
     }
 }
 
