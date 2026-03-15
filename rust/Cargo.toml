@@ -8,23 +8,20 @@ name = "solana_vanity"
 path = "src/main.rs"
 
 [dependencies]
-# ed25519-dalek: pure-Rust ed25519, no heavy Solana SDK overhead
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-# rand + ChaCha8Rng: CSPRNG tuned for speed (8-round ChaCha, ~4 GB/s)
-rand = "0.8"
+# ring = BoringSSL assembly for aarch64:
+#   - SHA-512 via sha512h/sha512h2/sha512su0/sha512su1 (FEAT_SHA512 hardware)
+#   - Ed25519 basepoint multiply via NEON-vectorised field arithmetic
+# Both are significantly faster than dalek's serial u64 backend + pure-Rust sha2.
+ring = "0.17"
+# ChaCha8Rng seeded from OS entropy once per thread; free-runs at ~4 GB/s.
 rand_chacha = "0.3"
-# bs58 only used for the 64-byte private key encode (not on hot path)
+rand_core = { version = "0.6", features = ["getrandom"] }
+# bs58 only called when a match is found (off the hot path).
 bs58 = "0.5"
 
 [profile.release]
 opt-level = 3
-# Fat (whole-program) LTO: lets LLVM inline across crate boundaries —
-# critical for inlining the ChaCha8 inner loop and ed25519 scalar mult.
-lto = "fat"
-codegen-units = 1   # single CGU required for fat LTO
-panic = "abort"     # remove unwinding machinery, smaller & faster
+lto = "fat"          # whole-program inlining
+codegen-units = 1
+panic = "abort"
 strip = true
-
-# Build with native CPU ISA so LLVM emits AVX2/SHA-NI/NEON intrinsics.
-# This alone can double ChaCha8 throughput on modern x86-64.
-# Set via .cargo/config.toml (see that file) — not here.

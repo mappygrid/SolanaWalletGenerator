@@ -1,4 +1,9 @@
 [build]
-# Compile for the exact CPU this machine has, enabling AVX2, SHA-NI (x86-64)
-# or NEON/SHA2 (Apple Silicon). Required for maximum ChaCha8 and ed25519 perf.
-rustflags = ["-C", "target-cpu=native"]
+# target-cpu=native: emit instructions for exactly this CPU.
+# +sha2,+sha3,+aes,+neon: explicitly force these even if auto-detection is
+# conservative. On M4 this activates FEAT_SHA512 in the sha2 crate and
+# hardware AES in ChaCha8's carry-less-multiply path.
+rustflags = [
+    "-C", "target-cpu=native",
+    "-C", "target-feature=+sha2,+sha3,+aes,+neon",
+]
