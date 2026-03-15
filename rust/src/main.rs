@@ -49,35 +49,105 @@ static STOP:     AtomicBool = AtomicBool::new(false);
 
 // ── Base58 alphabet (Bitcoin / Solana order) ─────────────────────────────────
 const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const BASE58_POW43: [u8; 32] = [
+    0x0e, 0xdb, 0xaf, 0xda, 0x67, 0xca, 0x37, 0x18,
+    0x8c, 0xf2, 0x82, 0x63, 0x57, 0x1f, 0x03, 0xb9,
+    0x71, 0x68, 0x79, 0xe4, 0xac, 0xc9, 0xc5, 0x14,
+    0xab, 0x67, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+#[inline(always)]
+fn ge_be_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut i = 0usize;
+    while i < 32 {
+        if a[i] != b[i] {
+            return a[i] > b[i];
+        }
+        i += 1;
+    }
+    true
+}
+
+#[inline(always)]
+fn sub_assign_be_32(a: &mut [u8; 32], b: &[u8; 32]) {
+    let mut borrow = 0u16;
+    let mut i = 32usize;
+    while i > 0 {
+        i -= 1;
+        let ai = a[i] as u16;
+        let bi = b[i] as u16 + borrow;
+        if ai >= bi {
+            a[i] = (ai - bi) as u8;
+            borrow = 0;
+        } else {
+            a[i] = ((ai + 256) - bi) as u8;
+            borrow = 1;
+        }
+    }
+}
+
+/// Fast first-character prefilter:
+/// - returns '1' for leading-zero pubkeys,
+/// - returns first char for common 44-char addresses via q = floor(N / 58^43),
+/// - returns None for shorter encodings (rare), requiring full base58 encode.
+#[inline(always)]
+fn first_base58_char_fast(pubkey: &[u8; 32]) -> Option<u8> {
+    if pubkey[0] == 0 {
+        return Some(b'1');
+    }
+    if !ge_be_32(pubkey, &BASE58_POW43) {
+        return None;
+    }
+
+    let mut rem = *pubkey;
+    let mut q = 0usize;
+    while ge_be_32(&rem, &BASE58_POW43) {
+        sub_assign_be_32(&mut rem, &BASE58_POW43);
+        q += 1;
+    }
+    Some(ALPHABET[q])
+}
 
 /// Encode a 32-byte public key into a stack buffer. Returns bytes written.
 /// Output fits in 44 bytes (ceil(32 * log(256)/log(58)) = 44).
 #[inline(always)]
 fn bs58_encode_stack(input: &[u8; 32], out: &mut [u8; 44]) -> usize {
-    let leading_zeros = input.iter().take_while(|&&b| b == 0).count();
+    let mut leading_zeros = 0usize;
+    while leading_zeros < 32 && input[leading_zeros] == 0 {
+        leading_zeros += 1;
+    }
 
-    let mut digits = [0u32; 46];
-    for &byte in input.iter() {
-        let mut carry = byte as u32;
-        for d in digits.iter_mut().rev() {
-            carry += *d << 8;
-            *d = carry % 58;
+    let mut digits = [0u16; 46];
+    let mut i = 0usize;
+    while i < 32 {
+        let mut carry = input[i] as u32;
+        let mut j = 46usize;
+        while j > 0 {
+            j -= 1;
+            carry += (digits[j] as u32) << 8;
+            digits[j] = (carry % 58) as u16;
             carry /= 58;
         }
+        i += 1;
     }
 
-    // Collect non-zero digits and reverse into output.
-    let mut tmp = [0u8; 44];
-    let mut len = 0usize;
-    for &d in digits.iter() {
-        if len > 0 || d != 0 {
-            tmp[len] = ALPHABET[d as usize];
-            len += 1;
-        }
+    let mut start = 0usize;
+    while start < 46 && digits[start] == 0 {
+        start += 1;
     }
+
+    let len = 46 - start;
     let total = leading_zeros + len;
-    for i in 0..leading_zeros { out[i] = b'1'; }
-    for i in 0..len           { out[leading_zeros + i] = tmp[i]; }  // no reversal — digits[0] is already MSB
+    i = 0;
+    while i < leading_zeros {
+        out[i] = b'1';
+        i += 1;
+    }
+    i = 0;
+    while i < len {
+        out[leading_zeros + i] = ALPHABET[digits[start + i] as usize];
+        i += 1;
+    }
     total
 }
 
@@ -86,21 +156,19 @@ fn bs58_encode_stack(input: &[u8; 32], out: &mut [u8; 44]) -> usize {
 fn prefix_matches(
     encoded: &[u8; 44],
     encoded_len: usize,
-    prefix_bytes: &[u8; 16],
-    prefix_len: usize,
+    prefix_bytes: &[u8],
     ignore_case: bool,
 ) -> bool {
+    let prefix_len = prefix_bytes.len();
     if encoded_len < prefix_len { return false; }
     if ignore_case {
         for i in 0..prefix_len {
             if encoded[i].to_ascii_uppercase() != prefix_bytes[i] { return false; }
         }
+        true
     } else {
-        for i in 0..prefix_len {
-            if encoded[i] != prefix_bytes[i] { return false; }
-        }
+        encoded[..prefix_len] == *prefix_bytes
     }
-    true
 }
 
 // ── Per-thread worker ─────────────────────────────────────────────────────────
@@ -109,63 +177,85 @@ fn worker(prefix_bytes: [u8; 16], prefix_len: usize, ignore_case: bool) {
     let mut rng = ChaCha8Rng::from_entropy();
 
     // Stack buffers reused every iteration — zero heap alloc in the hot loop.
-    let mut seed    = [0u8; 32];
+    const RNG_BATCH: usize = 64;
+    let mut seeds = [[0u8; 32]; RNG_BATCH];
     let mut encoded = [0u8; 44];
+    let prefix = &prefix_bytes[..prefix_len];
 
     const BATCH: u64 = 1 << 10;
+    const STOP_POLL_MASK: u64 = 0x3F;
     let mut local: u64 = 0;
 
     loop {
         if STOP.load(Ordering::Relaxed) { break; }
 
-        // ── 1. Random 32-byte seed ────────────────────────────────────────
-        rng.fill_bytes(&mut seed);
-
-        // ── 2+3. SHA-512(seed) + basepoint multiply (BoringSSL assembly) ──
-        //   ring::Ed25519KeyPair::from_seed_unchecked internally:
-        //     a) SHA-512(seed) → 64-byte expanded key
-        //        Uses sha512h/sha512h2/sha512su0/sha512su1 on M4 (FEAT_SHA512)
-        //     b) Clamp first 32 bytes per RFC 8032 §5.1.5
-        //     c) scalar × ED25519_BASEPOINT using NEON field-multiply pipeline
-        //   All in hand-written ARM assembly from BoringSSL — much faster than
-        //   dalek's serial u64 backend or pure-Rust sha2.
-        let pair = unsafe {
-            // SAFETY: seed is always exactly 32 bytes; this is the only
-            // failure condition, so Err is unreachable.
-            Ed25519KeyPair::from_seed_unchecked(&seed)
-                .unwrap_unchecked()
-        };
-
-        // ── 4. Get public key bytes ───────────────────────────────────────
-        let pubkey_slice = pair.public_key().as_ref(); // &[u8] of length 32
-        let pubkey_bytes: &[u8; 32] = pubkey_slice.try_into().unwrap();
-
-        // ── 5. Stack-encode to base58, compare prefix ─────────────────────
-        let enc_len = bs58_encode_stack(pubkey_bytes, &mut encoded);
-
-        if prefix_matches(&encoded, enc_len, &prefix_bytes, prefix_len, ignore_case) {
-            let pubkey_str = std::str::from_utf8(&encoded[..enc_len])
-                .unwrap_or("")
-                .to_owned();
-
-            // Solana private key = seed(32) || pubkey(32), bs58-encoded.
-            let mut full_secret = [0u8; 64];
-            full_secret[..32].copy_from_slice(&seed);
-            full_secret[32..].copy_from_slice(pubkey_slice);
-            let secret_str = bs58::encode(&full_secret).into_string();
-
-            let n = FOUND.fetch_add(1, Ordering::Relaxed) + 1;
-            println!("\n✅ FOUND #{}: {}", n, pubkey_str);
-            println!("({}, {})", pubkey_str, secret_str);
-
-            STOP.store(true, Ordering::Relaxed);
-            break;
+        for seed in &mut seeds {
+            rng.fill_bytes(seed);
         }
 
-        local += 1;
-        if local == BATCH {
-            ATTEMPTS.fetch_add(BATCH, Ordering::Relaxed);
-            local = 0;
+        for seed in &seeds {
+            if (local & STOP_POLL_MASK) == 0 && STOP.load(Ordering::Relaxed) {
+                break;
+            }
+
+            // ── 2+3. SHA-512(seed) + basepoint multiply (BoringSSL assembly)
+            let pair = unsafe {
+                // SAFETY: seed is always exactly 32 bytes; this is the only
+                // failure condition, so Err is unreachable.
+                Ed25519KeyPair::from_seed_unchecked(seed)
+                    .unwrap_unchecked()
+            };
+
+            let pubkey_slice = pair.public_key().as_ref(); // &[u8] of length 32
+            let pubkey_bytes: &[u8; 32] = pubkey_slice.try_into().unwrap();
+
+            if let Some(fc) = first_base58_char_fast(pubkey_bytes) {
+                let want = prefix[0];
+                let got = if ignore_case { fc.to_ascii_uppercase() } else { fc };
+                if got != want {
+                    local += 1;
+                    if local == BATCH {
+                        ATTEMPTS.fetch_add(BATCH, Ordering::Relaxed);
+                        local = 0;
+                    }
+                    continue;
+                }
+            }
+
+            let enc_len = bs58_encode_stack(pubkey_bytes, &mut encoded);
+
+            if prefix_matches(&encoded, enc_len, prefix, ignore_case) {
+                // Ensure only one worker announces and prints the match.
+                if STOP
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    let pubkey_str = std::str::from_utf8(&encoded[..enc_len])
+                        .unwrap_or("")
+                        .to_owned();
+
+                    // Solana private key = seed(32) || pubkey(32), bs58-encoded.
+                    let mut full_secret = [0u8; 64];
+                    full_secret[..32].copy_from_slice(seed);
+                    full_secret[32..].copy_from_slice(pubkey_slice);
+                    let secret_str = bs58::encode(&full_secret).into_string();
+
+                    let n = FOUND.fetch_add(1, Ordering::Relaxed) + 1;
+                    println!("\n✅ FOUND #{}: {}", n, pubkey_str);
+                    println!("({}, {})", pubkey_str, secret_str);
+                }
+                break;
+            }
+
+            local += 1;
+            if local == BATCH {
+                ATTEMPTS.fetch_add(BATCH, Ordering::Relaxed);
+                local = 0;
+            }
+        }
+
+        if STOP.load(Ordering::Relaxed) {
+            break;
         }
     }
     if local > 0 { ATTEMPTS.fetch_add(local, Ordering::Relaxed); }
@@ -289,4 +379,3 @@ fn fmt(n: u64) -> String {
 //  9. Cargo profile: fat LTO, codegen-units=1, panic=abort, target-cpu=native
 //     → SIMD for SHA-512 (ed25519 scalar mult), AVX2/NEON for ChaCha8.
 // ─────────────────────────────────────────────────────────────────────────────
-
