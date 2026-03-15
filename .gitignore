@@ -12,3 +12,4 @@ wallets/
 node_modules/
 
 rust/target/
+/target/

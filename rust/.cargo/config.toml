@@ -1,0 +1,4 @@
+[build]
+# Compile for the exact CPU this machine has, enabling AVX2, SHA-NI (x86-64)
+# or NEON/SHA2 (Apple Silicon). Required for maximum ChaCha8 and ed25519 perf.
+rustflags = ["-C", "target-cpu=native"]
