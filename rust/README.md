@@ -191,6 +191,19 @@ cargo build --release
 # Binary: target/release/solana_vanity
 ```
 
+Or use the optimized build helper:
+
+```bash
+./scripts/build_optimized.sh
+# Optional: PROFILE=dev ./scripts/build_optimized.sh
+```
+
+What it enables automatically (when tools are available):
+
+- `sccache` compiler artifact caching (`RUSTC_WRAPPER=sccache`)
+- Fast linkers on Linux (`mold`, fallback `lld`)
+- Host-aware parallel build jobs (`--jobs <logical-cpus>`)
+
 The `.cargo/config.toml` sets `target-cpu=native` so the binary is
 optimised for the machine it was compiled on and is not portable to other
 CPU generations.

@@ -1,9 +1,25 @@
 [build]
-# target-cpu=native: emit instructions for exactly this CPU.
-# +sha2,+sha3,+aes,+neon: explicitly force these even if auto-detection is
-# conservative. On M4 this activates FEAT_SHA512 in the sha2 crate and
-# hardware AES in ChaCha8's carry-less-multiply path.
+# Build for the host CPU generation.
+rustflags = ["-C", "target-cpu=native"]
+
+[target.aarch64-apple-darwin]
 rustflags = [
-    "-C", "target-cpu=native",
-    "-C", "target-feature=+sha2,+sha3,+aes,+neon",
+  "-C", "target-cpu=native",
+  # Ensure ARM crypto + SIMD features are available to codegen.
+  "-C", "target-feature=+sha2,+sha3,+aes,+neon",
+]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = [
+  "-C", "target-cpu=native",
+  "-C", "target-feature=+sha2,+sha3,+aes,+neon",
+  # Faster linker when lld is available.
+  "-C", "link-arg=-fuse-ld=lld",
+]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+  "-C", "target-cpu=native",
+  # Prefer modern fast linker on Linux.
+  "-C", "link-arg=-fuse-ld=lld",
 ]
