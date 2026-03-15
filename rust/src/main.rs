@@ -77,7 +77,7 @@ fn bs58_encode_stack(input: &[u8; 32], out: &mut [u8; 44]) -> usize {
     }
     let total = leading_zeros + len;
     for i in 0..leading_zeros { out[i] = b'1'; }
-    for i in 0..len           { out[leading_zeros + i] = tmp[len - 1 - i]; }
+    for i in 0..len           { out[leading_zeros + i] = tmp[i]; }  // no reversal — digits[0] is already MSB
     total
 }
 
